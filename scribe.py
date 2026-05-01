@@ -5,6 +5,7 @@ Requires: pip install textual
 """
 
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -60,7 +61,18 @@ TEMPLATES = {
 # ─── System info ──────────────────────────────────────────────────────────────
 
 def get_battery() -> str:
-    """Read battery from any available power supply."""
+    """Read battery — macOS and Linux."""
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.run(
+                ["pmset", "-g", "batt"], capture_output=True, text=True, timeout=2
+            ).stdout
+            import re
+            m = re.search(r"(\d+)%", out)
+            return m.group(1) + "%" if m else "--"
+        except Exception:
+            return "--"
+    # Linux: scan /sys/class/power_supply/
     psu_dir = Path("/sys/class/power_supply")
     if psu_dir.exists():
         for psu in sorted(psu_dir.iterdir()):
@@ -76,7 +88,23 @@ def get_battery() -> str:
 
 
 def get_wifi() -> str:
-    """Check if any wireless interface is up."""
+    """Check WiFi state — macOS and Linux."""
+    if sys.platform == "darwin":
+        try:
+            # Try the primary WiFi interface (en0 on most Macs, en1 on some)
+            for iface in ("en0", "en1", "en2"):
+                out = subprocess.run(
+                    ["networksetup", "-getairportnetwork", iface],
+                    capture_output=True, text=True, timeout=2
+                ).stdout
+                if "not associated" in out.lower() or "disabled" in out.lower():
+                    return "Wi-Fi: Off"
+                if "current wi-fi network" in out.lower():
+                    return "Wi-Fi: On"
+        except Exception:
+            pass
+        return "Wi-Fi: --"
+    # Linux: check /sys/class/net/
     net_dir = Path("/sys/class/net")
     if net_dir.exists():
         for iface in sorted(net_dir.iterdir()):

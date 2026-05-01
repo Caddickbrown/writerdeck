@@ -70,18 +70,58 @@ else
     warn "Or: sudo ./install.sh to install the 'scribe' command system-wide"
 fi
 
+# ── Detect OS ─────────────────────────────────────────────────────────────────
+OS="linux"
+[[ "$(uname)" == "Darwin" ]] && OS="mac"
+
 # ── Auto-launch on boot ───────────────────────────────────────────────────────
 step "Auto-launch on boot (optional)"
-echo "  This sets Scribe to launch automatically when the Pi boots into the terminal."
+if [[ "$OS" == "mac" ]]; then
+    echo "  On Mac, this adds a launchd agent — Scribe opens in a new Terminal window at login."
+else
+    echo "  On Pi/Linux, this sets Scribe to launch automatically on the HDMI terminal at boot."
+fi
 echo ""
-read -r -p "  Set up auto-launch on boot? [y/N] " boot_response
+read -r -p "  Set up auto-launch? [y/N] " boot_response
 
 if [[ "$boot_response" =~ ^[Yy]$ ]]; then
 
-    # Detect init system
-    if command -v systemctl &>/dev/null && systemctl --version &>/dev/null 2>&1; then
+    if [[ "$OS" == "mac" ]]; then
+        # ── macOS: launchd agent ──────────────────────────────────────────────
+        LAUNCH_DIR="$HOME/Library/LaunchAgents"
+        PLIST="$LAUNCH_DIR/com.scribe.writer.plist"
+        mkdir -p "$LAUNCH_DIR"
 
-        # Systemd path — create a user service
+        cat > "$PLIST" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.scribe.writer</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/open</string>
+        <string>-a</string>
+        <string>Terminal</string>
+        <string>${INSTALL_DIR}/scribe.py</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>${HOME}/Library/Logs/scribe.log</string>
+    <key>StandardErrorPath</key>
+    <string>${HOME}/Library/Logs/scribe.log</string>
+</dict>
+</plist>
+EOF
+        launchctl load "$PLIST" 2>/dev/null && \
+            ok "launchd agent installed — Scribe will open at login" || \
+            warn "Couldn't load agent — try: launchctl load $PLIST"
+
+    elif command -v systemctl &>/dev/null && systemctl --version &>/dev/null 2>&1; then
+        # ── Linux: systemd user service ───────────────────────────────────────
         SERVICE_DIR="$HOME/.config/systemd/user"
         mkdir -p "$SERVICE_DIR"
 
@@ -109,25 +149,32 @@ EOF
             warn "Couldn't enable service — try: systemctl --user enable scribe"
 
         echo ""
-        echo -e "  ${YELLOW}Note:${RESET} For auto-launch on tty1 (HDMI), you also need Pi to auto-login:"
+        echo -e "  ${YELLOW}Note:${RESET} For HDMI auto-launch, enable Console Autologin on the Pi:"
         echo "    sudo raspi-config → System Options → Boot / Auto Login → Console Autologin"
-        echo "  Then Scribe launches automatically on the HDMI display after boot."
 
     else
-        # Fallback: add to .bashrc
-        BASHRC="$HOME/.bashrc"
-        MARKER="# Scribe auto-launch"
-        if grep -q "$MARKER" "$BASHRC" 2>/dev/null; then
-            warn "Auto-launch already in $BASHRC — skipping"
+        # ── Fallback: shell profile ───────────────────────────────────────────
+        # Pick the right shell profile
+        if [[ "$OS" == "mac" ]]; then
+            PROFILE="$HOME/.zshrc"
+        elif [ -f "$HOME/.bashrc" ]; then
+            PROFILE="$HOME/.bashrc"
         else
-            cat >> "$BASHRC" << 'EOF'
+            PROFILE="$HOME/.profile"
+        fi
+
+        MARKER="# Scribe auto-launch"
+        if grep -q "$MARKER" "$PROFILE" 2>/dev/null; then
+            warn "Auto-launch already in $PROFILE — skipping"
+        else
+            cat >> "$PROFILE" << 'SHELLEOF'
 
 # Scribe auto-launch
 if [[ -z "$DISPLAY" && "$(tty)" == "/dev/tty1" ]]; then
     python3 ~/writerdeck/scribe.py
 fi
-EOF
-            ok "Added auto-launch to $BASHRC"
+SHELLEOF
+            ok "Added auto-launch to $PROFILE"
         fi
     fi
 
