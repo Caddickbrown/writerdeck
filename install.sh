@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# Scribe installer
+# Usage: ./install.sh
+
+set -e
+
+INSTALL_DIR="$HOME/writerdeck"
+DOCS_DIR="$HOME/Documents/scribe"
+SERVICE_NAME="scribe"
+
+# ── Colours ───────────────────────────────────────────────────────────────────
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+RESET='\033[0m'
+BOLD='\033[1m'
+
+ok()   { echo -e "${GREEN}✓${RESET} $1"; }
+warn() { echo -e "${YELLOW}!${RESET} $1"; }
+err()  { echo -e "${RED}✗${RESET} $1"; exit 1; }
+step() { echo -e "\n${BOLD}$1${RESET}"; }
+
+# ── Header ────────────────────────────────────────────────────────────────────
+echo ""
+echo -e "${BOLD}Scribe — distraction-free writing for Pi Zero 2W${RESET}"
+echo "──────────────────────────────────────────────────"
+echo ""
+
+# ── Check Python ──────────────────────────────────────────────────────────────
+step "Checking Python..."
+if ! command -v python3 &>/dev/null; then
+    err "Python 3 not found. Install with: sudo apt install python3 python3-pip"
+fi
+PY_VERSION=$(python3 --version 2>&1)
+ok "$PY_VERSION found"
+
+# ── Install Textual ───────────────────────────────────────────────────────────
+step "Installing dependencies..."
+if python3 -c "import textual" &>/dev/null; then
+    TEXTUAL_VERSION=$(python3 -c "import textual; print(textual.__version__)" 2>/dev/null || echo "installed")
+    ok "Textual already installed ($TEXTUAL_VERSION)"
+else
+    echo "Installing Textual..."
+    pip3 install textual --quiet && ok "Textual installed" || err "Failed to install Textual. Try: pip3 install textual"
+fi
+
+# ── Create directories ────────────────────────────────────────────────────────
+step "Setting up directories..."
+mkdir -p "$INSTALL_DIR"
+ok "Install dir: $INSTALL_DIR"
+mkdir -p "$DOCS_DIR"
+ok "Logs dir:    $DOCS_DIR"
+
+# ── Copy files ────────────────────────────────────────────────────────────────
+step "Installing Scribe..."
+cp scribe.py "$INSTALL_DIR/scribe.py"
+chmod +x "$INSTALL_DIR/scribe.py"
+ok "Copied scribe.py → $INSTALL_DIR/scribe.py"
+
+# Create a launcher script in /usr/local/bin if writable
+if [ -w /usr/local/bin ]; then
+    cat > /usr/local/bin/scribe << EOF
+#!/usr/bin/env bash
+python3 $INSTALL_DIR/scribe.py "\$@"
+EOF
+    chmod +x /usr/local/bin/scribe
+    ok "Launcher installed → run 'scribe' from anywhere"
+else
+    warn "Can't write to /usr/local/bin — run with: python3 ~/writerdeck/scribe.py"
+    warn "Or: sudo ./install.sh to install the 'scribe' command system-wide"
+fi
+
+# ── Auto-launch on boot ───────────────────────────────────────────────────────
+step "Auto-launch on boot (optional)"
+echo "  This sets Scribe to launch automatically when the Pi boots into the terminal."
+echo ""
+read -r -p "  Set up auto-launch on boot? [y/N] " boot_response
+
+if [[ "$boot_response" =~ ^[Yy]$ ]]; then
+
+    # Detect init system
+    if command -v systemctl &>/dev/null && systemctl --version &>/dev/null 2>&1; then
+
+        # Systemd path — create a user service
+        SERVICE_DIR="$HOME/.config/systemd/user"
+        mkdir -p "$SERVICE_DIR"
+
+        cat > "$SERVICE_DIR/${SERVICE_NAME}.service" << EOF
+[Unit]
+Description=Scribe — distraction-free writing
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=python3 ${INSTALL_DIR}/scribe.py
+StandardInput=tty
+StandardOutput=tty
+TTYPath=/dev/tty1
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+EOF
+
+        systemctl --user daemon-reload
+        systemctl --user enable "$SERVICE_NAME" 2>/dev/null && \
+            ok "Systemd user service enabled (${SERVICE_NAME}.service)" || \
+            warn "Couldn't enable service — try: systemctl --user enable scribe"
+
+        echo ""
+        echo -e "  ${YELLOW}Note:${RESET} For auto-launch on tty1 (HDMI), you also need Pi to auto-login:"
+        echo "    sudo raspi-config → System Options → Boot / Auto Login → Console Autologin"
+        echo "  Then Scribe launches automatically on the HDMI display after boot."
+
+    else
+        # Fallback: add to .bashrc
+        BASHRC="$HOME/.bashrc"
+        MARKER="# Scribe auto-launch"
+        if grep -q "$MARKER" "$BASHRC" 2>/dev/null; then
+            warn "Auto-launch already in $BASHRC — skipping"
+        else
+            cat >> "$BASHRC" << 'EOF'
+
+# Scribe auto-launch
+if [[ -z "$DISPLAY" && "$(tty)" == "/dev/tty1" ]]; then
+    python3 ~/writerdeck/scribe.py
+fi
+EOF
+            ok "Added auto-launch to $BASHRC"
+        fi
+    fi
+
+else
+    warn "Skipping auto-launch — run manually with: scribe"
+fi
+
+# ── Done ──────────────────────────────────────────────────────────────────────
+echo ""
+echo -e "${BOLD}──────────────────────────────────────────────────${RESET}"
+echo -e "${GREEN}Done!${RESET}"
+echo ""
+echo "  Run now:    python3 ~/writerdeck/scribe.py"
+if [ -x /usr/local/bin/scribe ]; then
+    echo "  Or:         scribe"
+fi
+echo ""
+echo "  Logs saved to: $DOCS_DIR"
+echo ""
