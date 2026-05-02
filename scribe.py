@@ -91,16 +91,28 @@ def get_wifi() -> str:
     """Check WiFi state — macOS and Linux."""
     if sys.platform == "darwin":
         try:
-            # Try the primary WiFi interface (en0 on most Macs, en1 on some)
-            for iface in ("en0", "en1", "en2"):
+            # Discover the actual WiFi interface name from hardware ports
+            ports = subprocess.run(
+                ["networksetup", "-listallhardwareports"],
+                capture_output=True, text=True, timeout=3
+            ).stdout
+            wifi_iface = None
+            lines = ports.splitlines()
+            for i, line in enumerate(lines):
+                if "wi-fi" in line.lower() or "airport" in line.lower():
+                    for j in range(i, min(i + 5, len(lines))):
+                        if "Device:" in lines[j]:
+                            wifi_iface = lines[j].split("Device:")[1].strip()
+                            break
+                    break
+            if wifi_iface:
                 out = subprocess.run(
-                    ["networksetup", "-getairportnetwork", iface],
+                    ["networksetup", "-getairportnetwork", wifi_iface],
                     capture_output=True, text=True, timeout=2
-                ).stdout
-                if "not associated" in out.lower() or "disabled" in out.lower():
-                    return "Wi-Fi: Off"
-                if "current wi-fi network" in out.lower():
+                ).stdout.lower()
+                if "current wi-fi network" in out:
                     return "Wi-Fi: On"
+                return "Wi-Fi: Off"
         except Exception:
             pass
         return "Wi-Fi: --"
