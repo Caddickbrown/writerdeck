@@ -110,7 +110,9 @@ def get_wifi() -> str:
                     ["networksetup", "-getairportnetwork", wifi_iface],
                     capture_output=True, text=True, timeout=2
                 ).stdout.lower()
-                if "current wi-fi network" in out:
+                # Negative test: if NOT "not associated" and there's actual output,
+                # assume connected — avoids breaking on macOS version string differences
+                if out.strip() and "not associated" not in out and "error" not in out:
                     return "Wi-Fi: On"
                 return "Wi-Fi: Off"
         except Exception:
@@ -410,7 +412,7 @@ class ScribeApp(App):
         Binding("ctrl+n", "new_doc", "New", show=False),
         Binding("ctrl+s", "save", "Save", show=False),
         Binding("ctrl+o", "open_last", "Open last", show=False),
-        Binding("ctrl+f", "search", "Search", show=False),
+        Binding("ctrl+f", "search", "Search", show=False, priority=True),
         Binding("ctrl+1", "mode_0", "Writing", show=False),
         Binding("ctrl+2", "mode_1", "Observation", show=False),
         Binding("ctrl+3", "mode_2", "Survival", show=False),
@@ -498,10 +500,20 @@ class ScribeApp(App):
         self.notify(f"Saved → {filename}")
 
     def action_open_last(self) -> None:
-        files = sorted(self._docs.glob("*.txt"), reverse=True) if self._docs.exists() else []
+        if not self._docs.exists():
+            self.notify("No saved logs found", severity="warning")
+            return
+        _, mode_label = MODES[self._current_mode_idx]
+        prefix = mode_label.lower()
+        # Try mode-specific files first, fall back to any file
+        mode_files = sorted(self._docs.glob(f"{prefix}_*.txt"), reverse=True)
+        all_files = sorted(self._docs.glob("*.txt"), reverse=True)
+        files = mode_files or all_files
         if not files:
             self.notify("No saved logs found", severity="warning")
             return
+        if not mode_files and all_files:
+            self.notify(f"No {mode_label} logs — opening most recent", severity="information")
         self._load_file(files[0])
 
     def action_search(self) -> None:
