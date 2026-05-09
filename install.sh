@@ -44,6 +44,53 @@ else
     pip3 install textual --quiet && ok "Textual installed" || err "Failed to install Textual. Try: pip3 install textual"
 fi
 
+# ── Optional hardware packages (Raspberry Pi only) ────────────────────────────
+if command -v raspi-config &>/dev/null; then
+    step "Optional hardware support (Raspberry Pi)"
+    echo "  Install BME280 sensor support? (temp/humidity/pressure via I2C)"
+    read -r -p "  [y/N] " bme_response
+    if [[ "$bme_response" =~ ^[Yy]$ ]]; then
+        pip3 install smbus2 RPi.bme280 --quiet && ok "BME280 support installed" || \
+            warn "BME280 install failed — try: pip3 install smbus2 RPi.bme280"
+        warn "Enable I2C: sudo raspi-config → Interface Options → I2C"
+    fi
+
+    echo ""
+    echo "  Install GPS support? (requires gpsd running)"
+    read -r -p "  [y/N] " gps_response
+    if [[ "$gps_response" =~ ^[Yy]$ ]]; then
+        sudo apt-get install -y gpsd gpsd-clients --quiet 2>/dev/null && \
+            pip3 install gpsd-py3 --quiet && ok "GPS support installed" || \
+            warn "GPS install failed — try: sudo apt install gpsd && pip3 install gpsd-py3"
+    fi
+
+    echo ""
+    echo "  Install rfkill for Wi-Fi toggle (Ctrl+W)?"
+    read -r -p "  [y/N] " rfkill_response
+    if [[ "$rfkill_response" =~ ^[Yy]$ ]]; then
+        sudo apt-get install -y rfkill --quiet 2>/dev/null && ok "rfkill installed" || \
+            warn "rfkill install failed — try: sudo apt install rfkill"
+    fi
+fi
+
+# ── Set up git repo for logs ──────────────────────────────────────────────────
+step "Git log repository"
+if command -v git &>/dev/null; then
+    if [[ ! -d "$DOCS_DIR/.git" ]]; then
+        git -C "$DOCS_DIR" init --quiet && ok "Initialised git repo in $DOCS_DIR"
+        echo ".DS_Store" > "$DOCS_DIR/.gitignore"
+        echo "Thumbs.db" >> "$DOCS_DIR/.gitignore"
+    else
+        ok "Git repo already exists in $DOCS_DIR"
+    fi
+    echo ""
+    echo "  To sync logs to a remote, add one:"
+    echo "    cd $DOCS_DIR && git remote add origin <url>"
+    echo "  Then use Ctrl+G in Scribe to push."
+else
+    warn "git not found — auto-commit disabled. Install with: sudo apt install git"
+fi
+
 # ── Create directories ────────────────────────────────────────────────────────
 step "Setting up directories..."
 mkdir -p "$INSTALL_DIR"

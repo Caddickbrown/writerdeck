@@ -2,10 +2,13 @@
 """
 Scribe — distraction-free writing UI for Pi Zero 2W
 Requires: pip install textual
+Optional: pip install smbus2 RPi.bme280 gpsd-py3
 """
 
+import shutil
 import subprocess
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -16,6 +19,23 @@ from textual.message import Message
 from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.widgets import Input, Label, ListItem, ListView, Static, TextArea
+
+# ─── Optional hardware ────────────────────────────────────────────────────────
+
+try:
+    import smbus2
+    import bme280 as _bme280
+    _bme280_bus = smbus2.SMBus(1)
+    _bme280_params = _bme280.load_calibration_params(_bme280_bus, 0x76)
+    HAS_BME280 = True
+except Exception:
+    HAS_BME280 = False
+
+try:
+    import gpsd as _gpsd
+    HAS_GPS = True
+except ImportError:
+    HAS_GPS = False
 
 
 # ─── Modes ────────────────────────────────────────────────────────────────────
@@ -31,10 +51,12 @@ TEMPLATES = {
     "Observation": (
         "OBSERVATION LOG — {date} {time}\n"
         "─────────────────────────────────\n"
-        "Weather: \n"
-        "Temp: \n"
-        "Mood: \n"
-        "Location: \n"
+        "Temp:     {temp}\n"
+        "Humidity: {humidity}\n"
+        "Pressure: {pressure}\n"
+        "Location: {gps}\n"
+        "Weather:  \n"
+        "Mood:     \n"
         "\n"
         "Notes:\n\n"
     ),
@@ -42,11 +64,12 @@ TEMPLATES = {
         "SURVIVAL LOG — {date} {time}\n"
         "──────────────────────────────\n"
         "Battery: {battery}\n"
+        "Temp:    {temp}\n"
         "\n"
         "Resources:\n"
         "  Water: \n"
-        "  Food: \n"
-        "  Fuel: \n"
+        "  Food:  \n"
+        "  Fuel:  \n"
         "\n"
         "Checklist:\n"
         "  [ ] \n"
@@ -72,7 +95,6 @@ def get_battery() -> str:
             return m.group(1) + "%" if m else "--"
         except Exception:
             return "--"
-    # Linux: scan /sys/class/power_supply/
     psu_dir = Path("/sys/class/power_supply")
     if psu_dir.exists():
         for psu in sorted(psu_dir.iterdir()):
@@ -87,38 +109,40 @@ def get_battery() -> str:
     return "--"
 
 
+def _get_macos_wifi_iface() -> str | None:
+    """Return the macOS Wi-Fi interface name (e.g. en0)."""
+    try:
+        ports = subprocess.run(
+            ["networksetup", "-listallhardwareports"],
+            capture_output=True, text=True, timeout=3
+        ).stdout
+        lines = ports.splitlines()
+        for i, line in enumerate(lines):
+            if "wi-fi" in line.lower() or "airport" in line.lower():
+                for j in range(i, min(i + 5, len(lines))):
+                    if "Device:" in lines[j]:
+                        return lines[j].split("Device:")[1].strip()
+    except Exception:
+        pass
+    return None
+
+
 def get_wifi() -> str:
     """Check WiFi state — macOS and Linux."""
     if sys.platform == "darwin":
-        try:
-            # Discover the actual WiFi interface name from hardware ports
-            ports = subprocess.run(
-                ["networksetup", "-listallhardwareports"],
-                capture_output=True, text=True, timeout=3
-            ).stdout
-            wifi_iface = None
-            lines = ports.splitlines()
-            for i, line in enumerate(lines):
-                if "wi-fi" in line.lower() or "airport" in line.lower():
-                    for j in range(i, min(i + 5, len(lines))):
-                        if "Device:" in lines[j]:
-                            wifi_iface = lines[j].split("Device:")[1].strip()
-                            break
-                    break
-            if wifi_iface:
+        iface = _get_macos_wifi_iface()
+        if iface:
+            try:
                 out = subprocess.run(
-                    ["networksetup", "-getairportnetwork", wifi_iface],
+                    ["networksetup", "-getairportnetwork", iface],
                     capture_output=True, text=True, timeout=2
                 ).stdout.lower()
-                # Negative test: if NOT "not associated" and there's actual output,
-                # assume connected — avoids breaking on macOS version string differences
                 if out.strip() and "not associated" not in out and "error" not in out:
                     return "Wi-Fi: On"
                 return "Wi-Fi: Off"
-        except Exception:
-            pass
+            except Exception:
+                pass
         return "Wi-Fi: --"
-    # Linux: check /sys/class/net/
     net_dir = Path("/sys/class/net")
     if net_dir.exists():
         for iface in sorted(net_dir.iterdir()):
@@ -129,6 +153,152 @@ def get_wifi() -> str:
                 except OSError:
                     pass
     return "Wi-Fi: --"
+
+
+def toggle_wifi() -> str:
+    """Toggle Wi-Fi on/off. Returns the new state string."""
+    is_on = "On" in get_wifi()
+    if sys.platform == "darwin":
+        iface = _get_macos_wifi_iface()
+        if iface:
+            try:
+                action = "off" if is_on else "on"
+                subprocess.run(
+                    ["networksetup", "-setairportpower", iface, action],
+                    capture_output=True, timeout=5
+                )
+            except Exception:
+                pass
+    else:
+        try:
+            cmd = ["rfkill", "block", "wifi"] if is_on else ["rfkill", "unblock", "wifi"]
+            subprocess.run(cmd, capture_output=True, timeout=5)
+        except Exception:
+            pass
+    return "Wi-Fi: Off" if is_on else "Wi-Fi: On"
+
+
+# ─── Hardware sensors ─────────────────────────────────────────────────────────
+
+def get_bme280() -> dict | None:
+    """Read BME280 temp/humidity/pressure. Returns None if unavailable."""
+    if not HAS_BME280:
+        return None
+    try:
+        data = _bme280.sample(_bme280_bus, 0x76, _bme280_params)
+        return {
+            "temp_c": round(data.temperature, 1),
+            "temp_f": round(data.temperature * 9 / 5 + 32, 1),
+            "humidity": round(data.humidity, 1),
+            "pressure": round(data.pressure, 1),
+        }
+    except Exception:
+        return None
+
+
+def get_gps_coords(timeout: float = 2.0) -> dict | None:
+    """Read GPS lat/lon via gpsd with a timeout. Returns None if unavailable."""
+    if not HAS_GPS:
+        return None
+    result: dict = {}
+
+    def _read() -> None:
+        try:
+            _gpsd.connect()
+            packet = _gpsd.get_current()
+            if packet.mode >= 2:
+                result["lat"] = round(packet.lat, 4)
+                result["lon"] = round(packet.lon, 4)
+        except Exception:
+            pass
+
+    t = threading.Thread(target=_read, daemon=True)
+    t.start()
+    t.join(timeout=timeout)
+    return result or None
+
+
+# ─── Git & sync ───────────────────────────────────────────────────────────────
+
+def git_autocommit(path: Path, on_done) -> None:
+    """Stage and commit a file in a background thread. Calls on_done(msg) on success."""
+    def _run() -> None:
+        docs = path.parent
+        try:
+            if not (docs / ".git").exists():
+                subprocess.run(["git", "init"], cwd=docs, capture_output=True, timeout=10)
+                gitignore = docs / ".gitignore"
+                if not gitignore.exists():
+                    gitignore.write_text(".DS_Store\nThumbs.db\n")
+                subprocess.run(
+                    ["git", "add", ".gitignore"],
+                    cwd=docs, capture_output=True, timeout=5
+                )
+            subprocess.run(["git", "add", path.name], cwd=docs, capture_output=True, timeout=5)
+            result = subprocess.run(
+                ["git", "commit", "-m", f"log: {path.name}"],
+                cwd=docs, capture_output=True, text=True, timeout=15
+            )
+            if result.returncode == 0:
+                on_done("✓ Committed")
+        except Exception:
+            pass
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def git_push(docs_dir: Path, on_done) -> None:
+    """Push all commits to remote in a background thread. Calls on_done(msg)."""
+    def _run() -> None:
+        try:
+            result = subprocess.run(
+                ["git", "push"],
+                cwd=docs_dir, capture_output=True, text=True, timeout=30
+            )
+            if result.returncode == 0:
+                on_done("✓ Synced to remote")
+            else:
+                err = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "push failed"
+                on_done(f"Sync: {err[:50]}")
+        except FileNotFoundError:
+            on_done("git not installed")
+        except Exception as e:
+            on_done(f"Sync error: {str(e)[:40]}")
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+# ─── USB dump ─────────────────────────────────────────────────────────────────
+
+def find_usb_drives() -> list[Path]:
+    """Return paths of mounted USB drives."""
+    if sys.platform == "darwin":
+        skip = {"Macintosh HD", "Preboot", "Recovery", "VM", "Update"}
+        volumes = Path("/Volumes")
+        return [d for d in volumes.iterdir() if d.is_dir() and d.name not in skip] if volumes.exists() else []
+    drives: list[Path] = []
+    try:
+        for line in Path("/proc/mounts").read_text().splitlines():
+            parts = line.split()
+            if len(parts) >= 2:
+                mp = Path(parts[1])
+                if any(str(mp).startswith(p) for p in ("/media/", "/mnt/", "/run/media/")):
+                    if mp.is_dir():
+                        drives.append(mp)
+    except Exception:
+        pass
+    return drives
+
+
+def dump_logs_to_usb(docs_dir: Path, usb: Path) -> int:
+    """Copy all .txt logs to <usb>/scribe_logs/. Returns count copied."""
+    dest = usb / "scribe_logs"
+    dest.mkdir(exist_ok=True)
+    count = 0
+    for f in docs_dir.glob("*.txt"):
+        shutil.copy2(f, dest / f.name)
+        count += 1
+    return count
 
 
 # ─── Search modal ─────────────────────────────────────────────────────────────
@@ -243,7 +413,6 @@ class SearchScreen(ModalScreen):
             try:
                 content = f.read_text()
                 if query in content.lower():
-                    # Find the first matching line for preview
                     snippet = ""
                     for line in content.splitlines():
                         if query in line.lower():
@@ -276,7 +445,7 @@ class SearchScreen(ModalScreen):
 # ─── Widgets ──────────────────────────────────────────────────────────────────
 
 class StatusBar(Static):
-    """Top bar: mode, date, time, wifi, battery."""
+    """Top bar: mode, date, time, focus state, wifi, battery."""
 
     current_mode: reactive[str] = reactive("WRITING")
 
@@ -290,10 +459,11 @@ class StatusBar(Static):
         time_str = now.strftime("%H:%M")
         wifi = get_wifi()
         batt = get_battery()
+        focus = "Connected" if "On" in wifi else "Focused"
         self.update(
             f"✎ {self.current_mode} MODE    "
             f"{date_str}  {time_str}    "
-            f"Focused    {wifi}    Batt: {batt}"
+            f"{focus}    {wifi}    Batt: {batt}"
         )
 
     def watch_current_mode(self, _: str) -> None:
@@ -337,8 +507,8 @@ class BottomBar(Static):
 
     def on_mount(self) -> None:
         self.update(
-            "  ^N New    ^S Save    ^O Open last    ^F Search    "
-            "^1/2/3 Mode    ^Tab Cycle    ^Q Quit"
+            "  ^N New    ^S Save    ^O Open    ^F Find    "
+            "^G Sync    ^W Wi-Fi    ^U USB    ^1/2/3 Mode    ^Q Quit"
         )
 
 
@@ -413,6 +583,9 @@ class ScribeApp(App):
         Binding("ctrl+s", "save", "Save", show=False),
         Binding("ctrl+o", "open_last", "Open last", show=False),
         Binding("ctrl+f", "search", "Search", show=False, priority=True),
+        Binding("ctrl+g", "git_sync", "Sync", show=False, priority=True),
+        Binding("ctrl+w", "toggle_wifi", "Wi-Fi", show=False, priority=True),
+        Binding("ctrl+u", "usb_dump", "USB dump", show=False, priority=True),
         Binding("ctrl+1", "mode_0", "Writing", show=False),
         Binding("ctrl+2", "mode_1", "Observation", show=False),
         Binding("ctrl+3", "mode_2", "Survival", show=False),
@@ -474,14 +647,22 @@ class ScribeApp(App):
         _, mode_label = MODES[self._current_mode_idx]
         template = TEMPLATES.get(mode_label, "")
         now = datetime.now()
+
+        # Read sensors synchronously (BME280 is fast; GPS has a short timeout)
+        bme = get_bme280() if mode_label in ("Observation", "Survival") else None
+        gps = get_gps_coords() if mode_label == "Observation" else None
+
         text = template.format(
             date=now.strftime("%Y-%m-%d"),
             time=now.strftime("%H:%M"),
             battery=get_battery(),
+            temp=f"{bme['temp_f']}°F / {bme['temp_c']}°C" if bme else "",
+            humidity=f"{bme['humidity']}%" if bme else "",
+            pressure=f"{bme['pressure']} hPa" if bme else "",
+            gps=f"{gps['lat']}, {gps['lon']}" if gps else "",
         )
         editor = self.query_one(TextArea)
         editor.load_text(text)
-        # Move cursor to end
         editor.move_cursor_relative(rows=999)
         self.notify(f"New {mode_label} log")
         editor.focus()
@@ -496,8 +677,10 @@ class ScribeApp(App):
         self._docs.mkdir(parents=True, exist_ok=True)
         prefix = mode_label.lower()
         filename = datetime.now().strftime(f"{prefix}_%Y-%m-%d_%H%M.txt")
-        (self._docs / filename).write_text(text)
+        filepath = self._docs / filename
+        filepath.write_text(text)
         self.notify(f"Saved → {filename}")
+        git_autocommit(filepath, lambda msg: self.call_from_thread(self.notify, msg))
 
     def action_open_last(self) -> None:
         if not self._docs.exists():
@@ -505,7 +688,6 @@ class ScribeApp(App):
             return
         _, mode_label = MODES[self._current_mode_idx]
         prefix = mode_label.lower()
-        # Try mode-specific files first, fall back to any file
         mode_files = sorted(self._docs.glob(f"{prefix}_*.txt"), reverse=True)
         all_files = sorted(self._docs.glob("*.txt"), reverse=True)
         files = mode_files or all_files
@@ -528,6 +710,35 @@ class ScribeApp(App):
         editor.load_text(path.read_text())
         self.notify(f"Opened {path.name}")
         editor.focus()
+
+    # ── Connectivity actions ──────────────────────────────────────────────────
+
+    def action_toggle_wifi(self) -> None:
+        new_state = toggle_wifi()
+        self.query_one("#statusbar", StatusBar)._refresh()
+        self.notify(new_state)
+
+    def action_git_sync(self) -> None:
+        if not self._docs.exists():
+            self.notify("No logs directory — save something first", severity="warning")
+            return
+        self.notify("Syncing…")
+        git_push(self._docs, lambda msg: self.call_from_thread(self.notify, msg))
+
+    def action_usb_dump(self) -> None:
+        drives = find_usb_drives()
+        if not drives:
+            self.notify("No USB drive detected", severity="warning")
+            return
+        if not self._docs.exists():
+            self.notify("No logs to copy", severity="warning")
+            return
+        usb = drives[0]
+        try:
+            count = dump_logs_to_usb(self._docs, usb)
+            self.notify(f"Copied {count} log(s) → {usb.name}/scribe_logs/")
+        except Exception as e:
+            self.notify(f"USB copy failed: {e}", severity="error")
 
 
 if __name__ == "__main__":
