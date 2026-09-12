@@ -1,1 +1,12 @@
+# Core
 textual>=0.70.0
+
+# Optional: BME280 temperature/humidity/pressure sensor (Raspberry Pi)
+# pip install smbus2 RPi.bme280
+# smbus2
+# RPi.bme280
+
+# Optional: GPS via gpsd daemon (Raspberry Pi)
+# Requires gpsd running: sudo apt install gpsd gpsd-clients
+# pip install gpsd-py3
+# gpsd-py3
