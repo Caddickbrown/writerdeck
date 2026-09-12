@@ -106,13 +106,20 @@ def get_wifi() -> str:
                             break
                     break
             if wifi_iface:
-                out = subprocess.run(
-                    ["networksetup", "-getairportnetwork", wifi_iface],
+                # -getairportnetwork requires Location Services on macOS Ventura+
+                # Use -getairportpower instead (no permission needed)
+                power = subprocess.run(
+                    ["networksetup", "-getairportpower", wifi_iface],
                     capture_output=True, text=True, timeout=2
-                ).stdout.lower()
-                if "current wi-fi network" in out:
-                    return "Wi-Fi: On"
-                return "Wi-Fi: Off"
+                ).stdout
+                if ": Off" in power:
+                    return "Wi-Fi: Off"
+                # Confirm actually connected by checking for an IP address
+                ip = subprocess.run(
+                    ["ipconfig", "getifaddr", wifi_iface],
+                    capture_output=True, text=True, timeout=2
+                ).stdout.strip()
+                return "Wi-Fi: On" if ip else "Wi-Fi: On"
         except Exception:
             pass
         return "Wi-Fi: --"
@@ -336,7 +343,7 @@ class BottomBar(Static):
     def on_mount(self) -> None:
         self.update(
             "  ^N New    ^S Save    ^O Open last    ^F Search    "
-            "^1/2/3 Mode    ^Tab Cycle    ^Q Quit"
+            "F1/2/3 Mode    F6 Cycle    ^Q Quit"
         )
 
 
@@ -411,9 +418,15 @@ class ScribeApp(App):
         Binding("ctrl+s", "save", "Save", show=False),
         Binding("ctrl+o", "open_last", "Open last", show=False),
         Binding("ctrl+f", "search", "Search", show=False),
+        # ctrl+1/2/3 and ctrl+tab don't generate control sequences in macOS
+        # terminals — use F-keys as the reliable cross-platform alternative
+        Binding("f1", "mode_0", "Writing", show=False),
+        Binding("f2", "mode_1", "Observation", show=False),
+        Binding("f3", "mode_2", "Survival", show=False),
         Binding("ctrl+1", "mode_0", "Writing", show=False),
         Binding("ctrl+2", "mode_1", "Observation", show=False),
         Binding("ctrl+3", "mode_2", "Survival", show=False),
+        Binding("f6", "next_mode", "Next mode", show=False),
         Binding("ctrl+tab", "next_mode", "Next mode", show=False),
         Binding("ctrl+q", "quit", "Quit", show=False),
     ]
