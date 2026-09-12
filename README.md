@@ -4,6 +4,8 @@ A low-power, distraction-free writing and logging setup for Raspberry Pi Zero 2W
 
 Built with [Textual](https://textual.textualize.io/) — runs in any terminal.
 
+![Writing mode](docs/screenshots/writing.svg)
+
 ## Setup
 
 ```bash
@@ -28,19 +30,31 @@ Or use the installer (handles boot auto-launch):
 | `Ctrl+G` | Git push — sync commits to remote over Wi-Fi |
 | `Ctrl+W` | Toggle Wi-Fi on/off |
 | `Ctrl+U` | USB data dump — copy all logs to detected USB drive |
-| `Ctrl+1/2/3` | Switch to Writing / Observation / Survival mode |
-| `Ctrl+Tab` | Cycle through modes |
+| `F1/F2/F3` | Switch to Writing / Observation / Survival mode (`Ctrl+1/2/3` also works where the terminal sends it) |
+| `F6` | Cycle through modes (`Ctrl+Tab` where supported) |
 | `Ctrl+Q` | Quit |
 
 ## Modes
 
-**Writing** — blank document, freeform journaling and notes.
+**Writing** — blank document, freeform journaling and notes. Shown in the
+screenshot above.
 
 **Observation** — structured template auto-filled with BME280 sensor data
 (temp, humidity, pressure) and GPS coordinates if hardware is present.
 
+![Observation mode](docs/screenshots/observation.svg)
+
 **Survival** — battery status, temp, resource tracking (water/food/fuel),
 and a checklist.
+
+![Survival mode](docs/screenshots/survival.svg)
+
+`Ctrl+F` searches the full text of every saved log, across all modes:
+
+![Full-text search](docs/screenshots/search.svg)
+
+Screenshots are generated from the real app with
+`python3 docs/screenshots/generate.py` — rerun it after UI changes.
 
 ## Data flow
 
